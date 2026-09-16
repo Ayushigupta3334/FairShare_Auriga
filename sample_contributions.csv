@@ -1,0 +1,14 @@
+name,amount,note
+Ayushi Gupta,1500,full contribution
+ayushi gupta,1500,full contribution
+Riya Sharma,"₹ 1,000",contribution
+Riya  Sharma,"1,000",contribution
+RAHUL MEENA,₹500,partial contribution
+Rahul Meena,"₹ 500",partial contribution
+Aman Singh,500,partial payment
+Aman Sing,"500",partial payment
+Neha Verma,"Rs. 2,000",covered friend
+Neha Verma,"2,000",covered friend
+,1000,missing name
+Karan Shah,abc,invalid amount
+Priya,"-500",negative amount
