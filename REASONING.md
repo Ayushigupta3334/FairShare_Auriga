@@ -1,72 +1,633 @@
-# Reasoning
+#FairShare --- Group Contribution & Settlement
+A simple contribution manager that turns messy payment records into
+clear, fair settlements.
 
-## What changed from the first pass, and why
+1. Problem Statement
+When a group buys a shared gift, everyone is expected to contribute an
+equal amount.
 
-The first version of this was a single self-contained HTML file with all logic in browser JavaScript and `localStorage` for persistence. That's a fine tool for a quick prototype, but it doesn't demonstrate backend engineering, isn't testable independently of a browser, and doesn't fit a "GitHub Codespaces submission" — Codespaces is a full dev container environment, and the natural thing to show off there is a real server, a real data layer, and tests that run in CI, not a single static file. So this version keeps the exact same product decisions (passbook metaphor, equal shares, balances, settlement) but re-implements them as a Python backend with a thin frontend.
+In reality, payment records are rarely clean:
 
-## Reading the brief (unchanged from round 1)
+One person may pay the full amount.
 
-The clue is in the questions the organiser keeps fielding: *"how much do I still owe"* is a per-person balance question; *"have we collected enough"* is a pool-total question; *"who pays whom"* is a settlement question. The build has three matching outputs, matched to three pure functions in `settlement.py`, not hard-coded to the ₹6,000 farewell-gift instance — any target amount and any group works.
+Someone may pay only part of their share.
 
-## Why Flask, specifically
+A person may cover another participant.
 
-Given "Python and what's best for a Codespaces submission," I weighed a few options:
+The same payment may appear more than once.
 
-- **Flask** — a few files, no ORM ceremony, starts with `python app.py`, one dependency. Easy for an evaluator to open in Codespaces, read top-to-bottom, and run in under a minute.
-- **Django** — far more scaffolding (settings module, apps, migrations framework) than a tool this size needs; would bury the actual logic being evaluated under boilerplate.
-- **FastAPI** — a reasonable alternative, but its main advantages (async, auto-generated OpenAPI docs, Pydantic validation) aren't relevant to a small synchronous CRUD app like this one, and it would add a dependency (`uvicorn`) for no real benefit here.
+The same person may appear with different capitalization or spacing.
 
-Flask was the best fit for "smallest amount of framework needed to clearly show real backend logic."
+Names may contain small spelling variations.
 
-## Why the business logic lives in its own module
+Amounts may appear as 1000, ₹1,000, Rs. 1000, etc.
 
-`settlement.py` has zero Flask or SQLite imports — it only takes plain dicts/lists in and returns dataclasses out. That's deliberate: it means the three core questions (fair share, balances, settlement) can be unit-tested directly (`tests/test_settlement.py`) without spinning up a server or a database, and it means the logic is easy to audit in isolation — an evaluator (or a future contributor) can read `settlement.py` top to bottom and verify the splitting math is correct without wading through routing code.
+Some rows may be incomplete or invalid.
 
-`app.py` is intentionally "dumb" by comparison: each route reads from SQLite, hands plain dicts to `settlement.py`, and returns the result as JSON. All the interesting logic is testable Python; the web layer is just plumbing.
+The difficult part is not simply adding the payments. The system must
+first determine which records are valid, who they belong to, and
+whether duplicate records should be ignored.
 
-## Why the frontend has no business logic
+FairShare solves this in two stages:
 
-In round 1, the frontend (JS) computed balances and settlement itself, against data in `localStorage`. Here, the frontend is deliberately "dumber": it calls `GET /api/state` after every change and renders whatever the server computed. This avoids two copies of the splitting math (one in Python, one in JS) that could drift out of sync — there is exactly one implementation of "what does everyone owe," and it lives in `settlement.py`.
+Clean the contribution data → calculate fair balances → generate
+settlements.
 
-## Why SQLite over a heavier database
+2. Goal
+Given:
 
-The brief describes a small, ad-hoc group pool — a handful of people, a few dozen transactions at most. SQLite needs no separate service, no connection string, no setup step in Codespaces: the file is created automatically on first run and is disposable (git-ignored) by design. A Postgres/MySQL setup would add real operational weight (a second container, credentials, a `docker-compose.yml`) for a workload that will never need it. Using raw `sqlite3` rather than an ORM (SQLAlchemy, etc.) keeps the three tables and four queries fully visible in `database.py` — there's nothing hidden behind a model layer for something this small.
+A total gift budget
 
-## Why the passbook metaphor, still
+A list of participants
 
-Group money-collection in India has a real, specific visual object attached to it: the bank passbook — a small booklet with a navy-and-gold cover, ruled pages, a running ledger of entries, and a stamped "statement" section. That object already encodes exactly the mental model this tool needs (a ledger of transactions, a running balance, a statement of who owes what):
+Existing contributions
 
-- **Cover** = account details (what the pool is for, the target, who's holding it).
-- **Account holders** = the passbook's registered names, which is also literally how the fair share is computed (divide by headcount).
-- **Transactions** = the ruled ledger page, one row per payment — this is where "someone paid extra to cover a friend" and "two people haven't paid" both show up naturally, with no special case for either.
-- **Statement summary** = the passbook's balance-brought-forward line, per person.
-- **Settlement slip** = styled like a bank transfer chit.
+Optionally, a messy CSV containing past contributions
 
-This was kept over a generic dashboard specifically because it says something about the subject (an everyday Indian financial object), rather than defaulting to rounded cards and drop shadows that any prompt like this tends to produce.
+the application answers:
 
-## Why balances don't need a "paid for" field
+How much has been collected?
 
-All that matters for a fair settlement is each person's **net balance** = total paid − fair share. If Person A pays double to cover Person B, A's balance goes positive and B's goes equally negative — `settle()` independently arrives at "B pays A," without ever needing to record *why* A overpaid. Tracking "who paid for whom" would only matter if the group wanted to preserve an informal side-agreement instead of settling to the fair split, which the brief doesn't ask for. Keeping the `payments` table to just `(member_id, amount, note)` keeps the tool general.
+How much remains?
 
-## The settlement algorithm
+What is each person's fair share?
 
-Classic *debt simplification* / min-cash-flow approach, implemented in `settle()`:
+Who still owes money?
 
-1. Compute each person's balance (paid − fair share).
-2. Split into creditors (balance > 0) and debtors (balance < 0).
-3. Sort each list by magnitude, descending.
-4. Repeatedly match the largest creditor with the largest debtor, settle the smaller of the two amounts, reduce both, drop whichever hits zero.
-5. Repeat until both lists are empty.
+Who has paid extra?
 
-This is greedy rather than a proven globally-minimum-transaction solution in every pathological case (true minimum-transaction-count settlement is NP-hard in general), but for a realistic group size it produces the same minimal or near-minimal count, and stays simple enough to verify by eye and by test. A ₹0.01 epsilon treats near-zero balances as settled so floating-point noise never produces a phantom "pay ₹0.0000000001" instruction.
+Who should pay whom?
 
-### Why settlement can leave money "unassigned"
+Which imported records were accepted, merged, duplicated, or
+rejected?
 
-One non-obvious behaviour, caught by a unit test while building this: if the pool isn't fully collected yet, `settle()` will only redistribute the amount that is genuinely sitting with an over-payer — not the full amount every under-payer still owes. For example, with a ₹6,000 target across 4 people where one person hasn't paid and another has only paid half, if only ₹1,500 of surplus exists (from the person who overpaid to cover someone else), the settlement plan will only move that ₹1,500 — the remaining shortfall is still owed *to the pool itself*, not to any teammate, because no one has actually fronted that money yet. That gap is exactly what the "still to collect" figure in Pool status already reports, so nothing is lost — it's just correctly categorised as "not yet collected" rather than invented as a fake peer-to-peer debt.
+The system is designed for an arbitrary group, not for one fixed
+example.
 
-## What was left out, on purpose
+3. Core Idea
+The most important calculation is the balance of each participant.
 
-- **Unequal shares / weighted splitting** — the brief explicitly says "start with equal shares," so weighted splits were left out. `fair_share()` is the one function that would change first if that requirement showed up later.
-- **Authentication / multi-user accounts** — out of scope for a small group tool; anyone with the link can use it, matching how an organiser would actually share this (a WhatsApp link), not a login-gated product.
-- **Multi-currency / multi-pool** — one pool at a time, matching the brief.
-- **A production WSGI server / deployment config** — Flask's dev server is intentionally what's shipped, since the target environment is a Codespaces dev container for evaluation, not a production deployment; `README.md` says so explicitly rather than silently shipping something that looks production-ready but isn't.
+Fair share
+If:
+
+Total budget = ₹6,000
+Participants = 6
+then:
+
+Fair share = ₹6,000 / 6
+           = ₹1,000 per person
+Balance
+For every participant:
+
+Balance = Amount Paid - Fair Share
+Therefore:
+
+Balance = 0 → settled
+
+Balance < 0 → participant still owes money
+
+Balance > 0 → participant should receive money
+
+Example:
+
+Participant Paid Fair Share Balance
+
+Ayushi ₹1,000 ₹1,000 ₹0
+Riya ₹500 ₹1,000 -₹500
+Rahul ₹1,500 ₹1,000 +₹500
+
+Rahul has paid ₹500 extra, while Riya owes ₹500.
+
+The application then converts these balances into a simple settlement
+such as:
+
+Riya → Rahul ₹500
+4. Handling the CSV Twist
+The CSV importer is a major part of the project.
+
+Instead of trusting imported data blindly, FairShare processes each row
+before it affects the final balances.
+
+The pipeline is:
+
+Messy CSV
+   ↓
+Read rows
+   ↓
+Validate required fields
+   ↓
+Normalize names
+   ↓
+Normalize amounts
+   ↓
+Detect duplicate records
+   ↓
+Detect close name variations
+   ↓
+Accept / Reject
+   ↓
+Store valid contributions
+   ↓
+Recalculate balances
+   ↓
+Generate settlements
+This makes the system more reliable than simply importing every row
+as-is.
+
+5. Name Normalization
+People can appear in a CSV in multiple forms:
+
+Ayushi Gupta
+ayushi gupta
+ AYUSHI GUPTA
+Ayushi   Gupta
+These should represent the same participant.
+
+The importer therefore normalizes basic formatting differences such as:
+
+Leading/trailing spaces
+
+Repeated spaces
+
+Capitalization
+
+Example:
+
+"  ayushi   gupta "
+        ↓
+"Ayushi Gupta"
+The system also detects close spelling variations when appropriate.
+
+Example:
+
+Aman Sing
+Aman Singh
+can be identified as a close name variation and mapped to the canonical
+participant name.
+
+Why this matters
+Without normalization, the application could incorrectly treat one
+person as multiple people and calculate the wrong fair share.
+
+6. Amount Normalization
+Contribution amounts may use different formats:
+
+1000
+₹1000
+₹1,000
+Rs. 1000
+Rs 1,000
+The importer converts supported formats into a consistent numeric value.
+
+For example:
+
+"₹1,000" → 1000
+"Rs. 500" → 500
+"500"     → 500
+Invalid amounts are not silently accepted.
+
+7. Duplicate Detection
+Duplicate contributions are dangerous because they can artificially
+increase the collected amount.
+
+For example:
+
+Ayushi Gupta, ₹1000
+Ayushi Gupta, ₹1000
+If the second row is the same transaction recorded twice, counting both
+would incorrectly produce:
+
+₹2,000
+instead of:
+
+₹1,000
+FairShare detects duplicate rows before adding them to the final
+contribution data.
+
+The import report records how many duplicates were removed.
+
+8. Invalid Data Handling
+The importer does not allow bad rows to silently affect the calculation.
+
+Examples of rows that can be rejected:
+
+,1000
+Ayushi Gupta,
+Ayushi Gupta,-500
+Ayushi Gupta,abc
+Instead of crashing the entire import, the system keeps processing valid
+rows and reports rejected records separately.
+
+This follows an important design principle:
+
+One bad row should not make the whole import unusable.
+
+9. Import Report
+After processing a CSV, the application shows an import summary.
+
+Example:
+
+13 data rows checked
+
+5 Imported
+5 Duplicates removed
+6 Name variants merged
+3 Rejected
+The report gives the organiser visibility into what happened to the
+input data.
+
+Detailed sections can show:
+
+Merged name variants
+
+Duplicate rows
+
+Rejected rows
+
+This is useful because the user can verify the cleaning process instead
+of trusting a hidden transformation.
+
+10. Settlement Algorithm
+Once the contribution data is clean, the application calculates
+participant balances.
+
+There are two groups:
+
+Debtors
+Participants whose balance is negative.
+
+Riya  -₹500
+Aman  -₹300
+Creditors
+Participants whose balance is positive.
+
+Rahul +₹500
+Neha  +₹300
+The settlement process matches debtors with creditors.
+
+Conceptually:
+
+Debtors                    Creditors
+
+Riya  owes ₹500    →       Rahul receives ₹500
+Aman  owes ₹300    →       Neha receives ₹300
+The result is a short list of payments rather than asking everyone to
+pay everyone else.
+
+Why this approach?
+The organiser does not need to manually reason through every
+contribution.
+
+The system converts:
+
+Individual payments
+        ↓
+Net balances
+        ↓
+Minimal/simple payment instructions
+11. Preventing Double Counting
+A particularly important design consideration is the difference between:
+
+money paid into the group pool
+
+and
+
+money one participant covered for another person.
+
+These should not automatically be treated as two separate contributions.
+
+For example, if Rahul pays ₹2,000 and says that ₹1,000 was also covering
+Aman, the system should not accidentally count:
+
+Rahul = ₹2,000
+Aman  = ₹1,000
+as ₹3,000 collected unless the underlying transaction actually
+represents that additional money.
+
+The safest approach is to treat the actual payment as the contribution
+and use the participant relationship/note only to explain who the
+payment was intended to cover.
+
+This keeps the financial calculation consistent.
+
+12. Application Architecture
+The project uses a lightweight architecture:
+
+                 ┌──────────────────────┐
+                 │      Web Browser      │
+                 │   HTML / CSS / JS     │
+                 └──────────┬───────────┘
+                            │
+                            ▼
+                 ┌──────────────────────┐
+                 │      Flask App       │
+                 │   Routes / Logic     │
+                 └───────┬───────┬──────┘
+                         │       │
+              ┌──────────┘       └───────────┐
+              ▼                              ▼
+     ┌─────────────────┐            ┌─────────────────┐
+     │  CSV Importer   │            │   Settlement    │
+     │ Clean & Validate│            │ Balance & Match │
+     └────────┬────────┘            └────────┬────────┘
+              │                              │
+              └──────────────┬───────────────┘
+                             ▼
+                    ┌─────────────────┐
+                    │  SQLite Database│
+                    └─────────────────┘
+13. Technology Stack
+Backend
+Python
+
+Flask
+
+SQLite
+
+Frontend
+HTML
+
+CSS
+
+JavaScript
+
+Data Processing
+Python CSV/data-cleaning logic
+
+Name normalization
+
+Amount parsing
+
+Duplicate detection
+
+Validation
+
+The stack was intentionally kept lightweight so the application can run
+easily in a development environment such as GitHub Codespaces.
+
+14. Why SQLite?
+The project does not require a large database system.
+
+SQLite is sufficient because:
+
+The application is lightweight.
+
+Data is stored locally.
+
+Setup is simple.
+
+No separate database server is required.
+
+It works well for a small group contribution application.
+
+This keeps the build focused on the actual problem rather than
+infrastructure.
+
+15. Why Deterministic Cleaning Instead of AI?
+The CSV cleaning rules are intentionally deterministic.
+
+For example:
+
+" ayushi gupta "
+        ↓
+trim spaces
+        ↓
+normalize case
+        ↓
+"Ayushi Gupta"
+Financial data should not depend on unpredictable decisions.
+
+For important operations such as:
+
+duplicate detection
+
+amount parsing
+
+validation
+
+balance calculation
+
+the application uses explicit rules.
+
+Fuzzy matching can assist with close name variations, but the final
+result is still reported transparently.
+
+The principle is:
+
+Use automation for repetitive work, but keep financial calculations
+explainable.
+
+16. Example End-to-End Flow
+Suppose the budget is:
+
+₹6,000
+and there are:
+
+6 participants
+FairShare calculates:
+
+₹6,000 ÷ 6 = ₹1,000 per person
+The imported data may contain:
+
+Ayushi Gupta, ₹1000
+ayushi gupta, ₹1000
+Riya Sharma, Rs. 500
+RAHUL MEENA, ₹1500
+Aman Sing, ₹1000
+Aman Singh, ₹1000
+The importer first cleans the records.
+
+It then:
+
+Normalizes name formatting.
+
+Detects close name variations.
+
+Removes duplicate transactions.
+
+Rejects invalid rows.
+
+Stores valid contributions.
+
+Recalculates participant totals.
+
+Calculates balances against the fair share.
+
+Generates the required payment instructions.
+
+The organiser sees the final financial state, along with an
+explanation of how the messy input was processed.
+
+17. Design Decisions
+Simple before clever
+The application starts with the easiest understandable model:
+
+Equal share
+    ↓
+Paid amount
+    ↓
+Balance
+    ↓
+Settlement
+This makes the system easy to explain and test.
+
+Transparent processing
+Imported data is not silently changed.
+
+The import report tells the user:
+
+What was imported
+
+What was duplicated
+
+What was merged
+
+What was rejected
+
+Local-first
+The application can run locally without requiring external services.
+
+Arbitrary groups
+The logic is based on participant data rather than hard-coded names or
+amounts.
+
+Practical UI
+The interface is designed like a financial ledger so that the important
+numbers --- collected amount, remaining amount, participant balances,
+and settlements --- are easy to find.
+
+18. Edge Cases Considered
+The application should handle situations such as:
+
+No participants
+
+One participant
+
+Participant has paid exactly their share
+
+Participant has paid more than their share
+
+Participant has paid less than their share
+
+Nobody has paid yet
+
+Budget has already been reached
+
+Duplicate CSV records
+
+Different name capitalization
+
+Extra spaces in names
+
+Close spelling variations
+
+Currency symbols in amounts
+
+Invalid amounts
+
+Missing names
+
+Missing amounts
+
+Negative contributions
+
+Empty CSV rows
+
+The goal is graceful handling rather than unexpected application
+failure.
+
+19. Testing Strategy
+The data-cleaning logic is separated into its own importer module so it
+can be tested independently.
+
+Important test cases include:
+
+✓ Normal name formatting
+✓ Case/spacing normalization
+✓ Amount parsing
+✓ Duplicate detection
+✓ Close name matching
+✓ Invalid row rejection
+✓ Valid rows being imported
+Separating the importer from the UI also makes debugging easier.
+
+20. What Makes This Project Different
+At first glance, this looks like a simple expense-sharing application.
+
+The actual challenge is the data quality problem.
+
+A normal implementation might assume:
+
+Name + Amount = clean data
+FairShare instead handles:
+
+Messy real-world data
+        ↓
+Data quality checks
+        ↓
+Reliable contribution records
+        ↓
+Fair-share calculation
+        ↓
+Actionable settlements
+So the project demonstrates more than CRUD operations. It demonstrates:
+
+Data cleaning
+
+Validation
+
+Entity/name normalization
+
+Duplicate detection
+
+Financial calculations
+
+Algorithmic settlement generation
+
+Database persistence
+
+Frontend-backend integration
+
+Explainable processing
+
+21. Future Improvements
+Possible extensions include:
+
+Login and multiple groups
+
+Export settlement summary as PDF/CSV
+
+WhatsApp/shareable settlement messages
+
+Manual correction of rejected CSV rows
+
+Better duplicate detection using transaction IDs
+
+Support for unequal shares
+
+Partial ownership of expenses
+
+Payment status tracking
+
+Multiple currencies
+
+Audit history for imported files
+
+These are intentionally outside the core implementation so that the
+current application remains simple and reliable.
+
+22. Final Outcome
+FairShare turns a messy contribution sheet into a clear answer:
+
+How much has been collected?
+How much does each person owe?
+Who has paid extra?
+Who should receive money?
+What happened to the imported data?
+The core philosophy is:
+
+Clean the data first. Calculate fairly. Explain the result.
+
+That makes the application useful not only for the farewell-gift
+scenario, but for any small group that needs to collect money fairly and
+settle contributions without manual calculation.
