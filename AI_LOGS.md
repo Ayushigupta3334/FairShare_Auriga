@@ -90,4 +90,332 @@ Code·HTML
 
 Test settlement
 PY 
+I already have a working Flask + SQLite + HTML/CSS/JavaScript application called FairShare.
 
+IMPORTANT:
+Do NOT rebuild the application.
+Do NOT change the existing visual design significantly.
+Do NOT migrate to React.
+Do NOT replace Flask or SQLite.
+Do NOT rewrite settlement.py.
+
+I need to add the BUILD ROUND TWIST:
+
+"The solution must import a messy list of past contributions — with duplicate entries, the same person's name spelled differently, amounts written in inconsistent formats, and some invalid rows. Import it, produce correct balances from the cleaned data, and report what was imported, de-duplicated, merged, and rejected."
+
+First inspect the existing project structure and preserve the current architecture.
+
+CURRENT IMPORTANT FILES:
+- app.py
+- database.py
+- settlement.py
+- templates/index.html
+- static/app.js
+- static/style.css
+
+IMPLEMENT THIS WITH MINIMAL CHANGES.
+
+1. CREATE NEW FILE:
+fairshare/importer.py
+
+Keep all CSV cleaning/import logic here.
+
+The importer must:
+
+A. Read CSV files with columns:
+name, amount, note
+
+B. Normalize names:
+- trim leading/trailing whitespace
+- collapse multiple spaces
+- case-insensitive comparison
+- recognize obvious spelling/format variants
+- use conservative fuzzy matching for close names
+- NEVER merge two names when confidence is low
+- if a name matches an existing participant, use the existing participant
+
+Example:
+"ayushi gupta" → "Ayushi Gupta"
+"AYUSHI GUPTA" → "Ayushi Gupta"
+"Riya  Sharma" → "Riya Sharma"
+
+C. Normalize amounts:
+Accept formats such as:
+1000
+1000.00
+₹1000
+₹ 1,000
+1,000
+Rs. 1000
+Rs 1,000
+
+Convert them to numeric rupee amounts.
+
+D. Reject invalid rows:
+- missing name
+- missing amount
+- non-numeric amount
+- negative amount
+- malformed row
+
+E. Detect duplicate contribution rows.
+
+For this application, an exact duplicate means the same normalized person + same amount + same note.
+
+Do NOT treat two legitimate payments from the same person for the same amount as duplicates unless they are exact duplicate rows.
+
+F. Produce an import report containing:
+- total rows
+- imported rows
+- duplicate rows
+- merged name rows
+- rejected rows
+- details of merged names
+- details of rejected rows
+- details of duplicates
+
+2. MODIFY app.py
+
+Add a new endpoint:
+
+POST /api/import
+
+It should accept a CSV file using multipart/form-data.
+
+The endpoint should:
+- receive the uploaded CSV
+- call importer.py
+- resolve cleaned names against existing members
+- create a new member when an imported name does not already exist
+- insert valid non-duplicate contributions into the existing payments table
+- return the import report
+- then return the updated state
+
+Do NOT duplicate balance or settlement calculations.
+
+Continue using the existing:
+compute_balances()
+pool_status()
+settle()
+
+3. MODIFY templates/index.html
+
+Add a new section between "Pool status" and "Transactions".
+
+Title:
+"Import past contributions"
+
+Subtitle:
+"clean a messy CSV without losing the audit trail"
+
+Include:
+- CSV file input
+- Import button
+- small supported-format hint
+- import report area
+
+The report should clearly show:
+
+ROWS FOUND
+IMPORTED
+DUPLICATES REMOVED
+NAMES MERGED
+REJECTED
+
+Also show expandable/detail lists for:
+- merged names
+- duplicate rows
+- rejected rows
+
+4. MODIFY static/app.js
+
+Add the import functionality using fetch() and FormData.
+
+After successful import:
+- refresh the existing dashboard
+- show the import report
+- ensure imported payments appear in Transactions
+- ensure balances update
+- ensure pool status updates
+- ensure settlement updates
+
+Do not duplicate business logic in JavaScript.
+
+5. MODIFY static/style.css only as necessary.
+
+Keep the existing ledger/passbook visual style.
+
+Do NOT redesign the application.
+
+6. Add a "Load Demo CSV" option if practical, but the main requirement is real CSV upload.
+
+7. IMPORTANT EDGE CASES
+
+Test:
+- different capitalization of names
+- extra spaces in names
+- ₹1,000
+- Rs. 1000
+- 1000
+- invalid amount
+- negative amount
+- missing name
+- duplicate row
+- same person making two legitimate payments
+- imported name matching an existing participant
+- imported new participant
+- empty CSV
+- malformed CSV
+
+8. After implementation, explain exactly:
+- which files were changed
+- what importer.py does
+- how duplicate detection works
+- how name merging works
+- how invalid rows are rejected
+- how imported data reaches SQLite
+- how the existing settlement algorithm uses the cleaned payments
+
+Do not modify the existing settlement algorithm unless absolutely necessary.
+Use the demo CSV that I included in the updated project.
+
+📁 Location
+
+Inside your project:
+
+fairshare/
+└── static/
+    └── demo_contributions.csv
+
+So in Codespaces, look for:
+
+static → demo_contributions.csv
+
+Then select that file in Import Past Contributions.
+
+What is inside it?
+
+It's intentionally messy to demonstrate the twist:
+
+Different capitalization of names
+Extra spaces in names
+₹1000
+₹ 1,000
+Rs. 2,000
+Duplicate contribution rows
+Similar/spelled-differently names
+Missing names
+Invalid amounts
+Negative amounts
+
+So it lets you demonstrate the complete requirement:
+
+Messy CSV
+   ↓
+Import
+   ↓
+✓ Imported
+↻ Duplicates removed
+≈ Names merged
+✕ Invalid rows rejected
+   ↓
+Correct balances
+   ↓
+Settlement plan
+If you don't see the file
+
+In your Codespaces terminal, run:
+
+find . -name "demo_contributions.csv"
+
+It should return something like:
+
+./static/demo_contributions.csv
+
+Don't use your old CSV from another project. Use static/demo_contributions.csv for your demo.
+
+do you think it get messy in seeing?
+
+Yes — a little messy visually, especially because the “Merged names” section shows 6 individual rows immediately. The functionality is good, but for a build-round demo, you want the screen to look clean and intentional, not like a debugging log.
+
+I’d change it like this:
+
+What I would improve
+
+1. Keep the summary exactly as it is
+The top is excellent:
+
+13 rows checked → 5 imported
+5 duplicates → 6 names merged → 3 rejected
+
+That immediately proves your CSV-cleaning feature works.
+
+2. Collapse the details by default
+
+Instead of showing:
+
+Merged names (6)
+Row 2 ...
+Row 3 ...
+Row 5 ...
+Row 7 ...
+Row 9 ...
+Row 11 ...
+
+show:
+
+▸ Merged names (6)
+▸ Duplicates removed (5)
+▸ Rejected rows (3)
+
+Then the judge can click one if they want to inspect the details.
+
+3. Make the report hierarchy clearer
+
+I'd aim for:
+
+IMPORT REPORT                         5 imported
+13 data rows checked
+
+┌──────────┬──────────────┬────────────┬──────────┐
+│ 5        │ 5            │ 6          │ 3        │
+│ Imported │ Duplicates   │ Names      │ Rejected │
+│          │ removed      │ merged     │          │
+└──────────┴──────────────┴────────────┴──────────┘
+
+▸ Merged names (6)
+▸ Duplicates removed (5)
+▸ Rejected rows (3)
+
+This is much cleaner.
+
+One more important thing
+
+Your current wording:
+
+Names merged: 6
+
+could be slightly confusing because a judge might think 6 people were merged.
+
+I'd use:
+
+6 name variations merged
+
+or:
+
+6 name variants normalized
+
+Then the details can show:
+
+ayushi gupta → Ayushi Gupta
+RAHUL MEENA → Rahul Meena
+Aman Singhh → Aman Singh
+
+That makes the twist of the problem immediately obvious.
+
+Overall
+
+Don't redesign the whole UI. Your dark ledger aesthetic is actually distinctive. Just make the detailed report collapsed by default. That one change will make it feel much more like a polished product and less like raw processing output.
+
+If you want, I can also give you the 
+exact HTML/CSS changes to make this report compact without touching the rest of your project.
