@@ -1,4 +1,4 @@
-#FairShare --- Group Contribution & Settlement
+FairShare --- Group Contribution & Settlement
 A simple contribution manager that turns messy payment records into
 clear, fair settlements.
 
